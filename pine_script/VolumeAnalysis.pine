@@ -1,0 +1,182 @@
+//@version=6
+indicator('Volume Analysis', 'VA', precision = 4, format = format.volume)
+//by gorx1
+
+
+//  dependencies........................................................................................................
+type distro
+    float low_lim
+    float low_ext
+    float low_dev
+    float basis
+    float upp_dev
+    float upp_ext
+    float upp_lim
+    float dev
+    float asym
+
+
+mean(array<float> data, array<float> weights, len) =>
+    sum = 0.
+
+    for i = 0 to len - 1
+        sum += data.get(i) * weights.get(i)
+
+    array.new<float>(len, sum / weights.sum())
+
+
+std_moments(array<float> data, array<float> weights, array<float> fit, len) =>
+    sum_w = weights.sum()
+    
+    sum_m0 = 0.
+    sum_m1 = 0.
+    sum_m2 = 0.
+    sum_m3 = 0.
+    sum_m4 = 0.
+    sum_m5 = 0.
+    sum_m6 = 0.
+
+    for i = 0 to len - 1
+        weight = weights.get(i)
+        diff   = data   .get(i) - fit.get(i)
+
+        sum_m0 += math.pow(diff, 0) * weight
+        sum_m1 += math.pow(diff, 1) * weight
+        sum_m2 += math.pow(diff, 2) * weight
+        sum_m3 += math.pow(diff, 3) * weight
+        sum_m4 += math.pow(diff, 4) * weight
+        sum_m5 += math.pow(diff, 5) * weight
+        sum_m6 += math.pow(diff, 6) * weight
+
+
+    init = math.pow(sum_m0 / sum_w, 0)
+
+    bias = math.pow(sum_m1 / sum_w, 1 / 1)
+    dev  = math.pow(sum_m2 / sum_w, 1 / 2)
+
+    skew  = (sum_m3 / sum_w) / math.pow(dev, 3)
+    kurt  = (sum_m4 / sum_w) / math.pow(dev, 4)
+    hskew = (sum_m5 / sum_w) / math.pow(dev, 5)
+    hkurt = (sum_m6 / sum_w) / math.pow(dev, 6)
+
+
+    [bias, dev, skew, kurt, hskew, hkurt]
+
+
+mbad(data_y, weights, len) =>
+    fit                                   = mean       (data_y, weights,      len)
+    [bias, dev, skew, kurt, hskew, hkurt] = std_moments(data_y, weights, fit, len)
+    center                                = fit.get(0)
+
+
+    out = distro.new()
+
+    out.low_lim := center - (dev - bias) * (hkurt - hskew)
+    out.low_ext := center - (dev - bias) * ( kurt -  skew)
+    out.low_dev := center - (dev - bias)                  
+    out.basis   := center                                  
+    out.upp_dev := center + (dev + bias)                  
+    out.upp_ext := center + (dev + bias) * ( kurt +  skew)
+    out.upp_lim := center + (dev + bias) * (hkurt + hskew)
+
+    out.dev := dev    
+
+    out.asym := ((skew / kurt) - (hskew / hkurt)) * dev * 2
+
+
+    out
+
+
+pine_ema(src, alpha) =>
+    sum = 0.0
+    sum := na(sum[1]) ? src : alpha * src + (1 - alpha) * nz(sum[1])
+//  dependencies........................................................................................................
+
+
+//  data interval logic.................................................................................................
+len = input(64, 'moving window length', 'make it 0 to calculate over all available data')
+
+len := len > bar_index + 1 ? bar_index + 1 : len
+//  data interval logic.................................................................................................
+
+
+//  data................................................................................................................
+multi = input(256, 'inferred volume multiplier', group = 'data')
+
+volume_delta = multi * (close - open) / syminfo.mintick     //  inferred volume delta
+//  volumeDelta //real, not available on tradingview rn (current official tradingview script is a proxy)
+
+var cvd_init = close / syminfo.mintick * multi
+//  var cvd_init = input(10000) * multi
+
+cvd = ta.cum(volume_delta) + cvd_init
+//  data................................................................................................................
+
+
+//  main................................................................................................................
+data_x       = array.new_float(len)
+data_time    = array.new_float(len)
+data_cvd     = array.new_float(len)
+data_cvd_abs = array.new_float(len)
+
+for i = 0 to len - 1
+    data_x      .set(i, len - i)
+
+    data_time   .set(i, len - i         )
+    data_cvd    .set(i,          cvd[i] )
+    data_cvd_abs.set(i, math.abs(cvd[i]))
+
+weights_unit = array.new_float(len, 1.)
+
+distro distro_time     = mbad(data_time, data_cvd_abs, len)
+distro distro_ref_time = mbad(data_time, weights_unit, len)
+distro distro_cvd      = mbad(data_cvd , data_time   , len)
+
+
+time_basis   = distro_time.basis  
+time_upp_dev = distro_time.upp_dev
+
+ref_time_basis   = distro_ref_time.basis  
+ref_time_upp_dev = distro_ref_time.upp_dev
+
+cvd_low_dev = distro_cvd.low_dev
+cvd_basis   = distro_cvd.basis
+cvd_upp_dev = distro_cvd.upp_dev
+
+
+impact_basis     = time_basis   - ref_time_basis   
+impact_dev_upper = time_upp_dev - ref_time_upp_dev
+
+volume_imbalance = impact_basis > 0 and impact_dev_upper > 0 ? 1 : impact_basis < 0 and impact_dev_upper < 0 ? -1 : 0
+
+
+alpha = 2 / (bar_index + 1)
+
+volume_ratio = nz(pine_ema(volume, alpha) / pine_ema((high - low) / syminfo.mintick + 1, alpha), multi)
+//  main................................................................................................................
+
+
+//  visuals.............................................................................................................
+color_cvd = volume_imbalance > 0 ? color.blue : volume_imbalance < 0 ? color.red : color.purple
+
+plot(cvd, 'cvd', color_cvd, 2, plot.style_stepline, join = true)
+
+
+plot(cvd_low_dev, 'lower deviation', color.purple, 1, plot.style_stepline)
+plot(cvd_basis  , 'basis'          , color.purple, 1, plot.style_stepline)
+plot(cvd_upp_dev, 'upper deviation', color.purple, 1, plot.style_stepline)
+
+
+var vb = line.new(0, 0, 0, 0, color = color.gray, width = 1, style = line.style_dashed)
+
+cvd_lo = ta.lowest (cvd, len)
+cvd_hi = ta.highest(cvd, len)
+
+vb.set_x1(bar_index - len)
+vb.set_y1(cvd_lo         )
+vb.set_x2(bar_index - len)
+vb.set_y2(cvd_hi         )
+
+
+plot(volume_ratio, 'inferred volume advised multiplier', color.gray, display = display.status_line)
+//  visuals.............................................................................................................
