@@ -1,0 +1,320 @@
+//@version=6
+indicator('Volatility Simulation & Analysis','VSA', false, timeframe = '', timeframe_gaps = true, max_bars_back = 5000)
+//by gorx1
+
+
+//  dependencies........................................................................................................
+ln_gamma(float z_in) => //  log gamma func, made by gpt/gem/cop, dont remember
+    eps = 1e-16
+    if z_in <= 0 and math.abs(z_in - math.round(z_in)) < eps
+        runtime.error("ln_gamma: pole at non-positive integer")
+    is_small = z_in < 0.5
+    z        = is_small ? 1.0 - z_in : z_in
+    z1       = z - 1.0
+
+    a0  =   0.99999999999999709182
+    a1  =  57.156235665862923517
+    a2  = -59.597960355475491248
+    a3  =  14.136097974741747174
+    a4  =  -0.49191381609762019978
+    a5  =   0.000033994649984811888699
+    a6  =   0.000046523628927048575665
+    a7  =  -0.000098374475304879564677
+    a8  =   0.00015808870322491248884
+    a9  =  -0.00021026444172410488319
+    a10 =   0.00021743961811521264320
+    a11 =  -0.00016431810653676389022
+    a12 =   0.000084418223983852743293
+    a13 =  -0.000026190838401581408670
+    a14 =   0.0000036899182659531622704
+
+    x = a0 +
+         a1  / (z1 +  1.0) +
+         a2  / (z1 +  2.0) +
+         a3  / (z1 +  3.0) +
+         a4  / (z1 +  4.0) +
+         a5  / (z1 +  5.0) +
+         a6  / (z1 +  6.0) +
+         a7  / (z1 +  7.0) +
+         a8  / (z1 +  8.0) +
+         a9  / (z1 +  9.0) +
+         a10 / (z1 + 10.0) +
+         a11 / (z1 + 11.0) +
+         a12 / (z1 + 12.0) +
+         a13 / (z1 + 13.0) +
+         a14 / (z1 + 14.0)
+
+    g         = 607.0 / 128.0
+    t         = z1 + g + 0.5
+    res       = 0.5 * math.log(2.0 * math.pi) + (z - 0.5) * math.log(t) - t + math.log(x)
+    final_res = is_small ? math.log(math.pi) - math.log(math.abs(math.sin(math.pi * z_in))) - res : res
+    
+
+    final_res
+
+
+gamma_func(float z) => //  yes it's better this way: to make log gamma fucn first
+    math.exp(ln_gamma(z))
+
+
+lehmer_mean_online(float datapoint, int length, float p) => // Lehmer Mean    
+    var float num = na
+    var float den = na
+    
+    n = 0
+
+    for i = 0 to length - 1
+        if not na(datapoint[i])
+            n += 1
+
+    if length == 1
+        num := na
+        den := na
+        n   := na
+
+    if not na(datapoint)
+        if na(num)
+            num := math.pow(datapoint, p    ) 
+            den := math.pow(datapoint, p - 1) 
+        else
+            alpha = 1 / n
+            num  := alpha * math.pow(datapoint, p    ) + (1 - alpha) * num
+            den  := alpha * math.pow(datapoint, p - 1) + (1 - alpha) * den
+
+
+    num / den
+
+
+innovations_parameters(float datapoint, int length, float step_space) =>
+    var float mean = na
+    var float vari = na
+
+    n = 0
+
+    for i = 0 to length - 1
+        if not na(datapoint[i])
+            n += 1
+
+
+    if length == 1
+        mean := na
+        vari := na
+        n    := na
+
+
+    if not na(datapoint)
+        if na(mean)
+            mean := datapoint
+            vari := 0.
+        else
+            alpha = 1 / n
+            vari := alpha * math.pow(datapoint - mean, 2) + (1 - alpha) * vari
+            mean := alpha *          datapoint            + (1 - alpha) * mean
+
+    stdev = math.sqrt(vari + math.pow(step_space, 2) / 12)
+
+
+    [mean, stdev]
+
+
+mfpm(float data, int length, float step_space) => //  Mechanical Feedback Price Model
+    forecast       = length == 1 ? data : length == 2 ? data[1] : (data[1] + data[2]) / 2
+    innovation     = data - forecast
+    abs_innovation = math.abs(innovation)
+
+    [neg_mean, neg_stdev] = innovations_parameters(innovation < 0 ? abs_innovation : na, length, step_space)
+    [pos_mean, pos_stdev] = innovations_parameters(innovation > 0 ? abs_innovation : na, length, step_space)
+
+
+    [forecast, innovation, neg_mean, neg_stdev, pos_mean, pos_stdev]
+
+
+noise_gaussian() => // with unit variance, gives 2 samples per call
+    u1 = math.random(0, 1)
+    u2 = math.random(0, 1)
+
+    rho   = math.sqrt(-2 * math.log(math.max(u1, 1e-256)))
+    theta = 2 * math.pi * u2
+
+
+    [rho * math.cos(theta), rho * math.sin(theta)]
+
+
+gamma_mt(float shape, float scale) =>
+    d         = shape - 1 / 3
+    c         = 1 / math.sqrt(9 * d)
+    float out = na
+
+    for i = 0 to 0 //  "to 0" gives 1/400 chance to hit fallback, "to 1" would give 1/160000 chance, "to 2" even less
+        [x0, x1] = noise_gaussian()
+        
+        v0 = math.pow(1 + c * x0, 3)
+        if v0 > 0
+            u = math.random(0, 1)
+            if math.log(math.max(u, 1e-256)) < 0.5 * x0 * x0 + d - d * v0 + d * math.log(v0)
+                out := d * v0 * scale
+                break
+        
+        v1 = math.pow(1 + c * x1, 3)
+        if v1 > 0
+            u = math.random(0, 1)
+            if math.log(math.max(u, 1e-256)) < 0.5 * x1 * x1 + d - d * v1 + d * math.log(v1)
+                out := d * v1 * scale
+                break
+
+
+    nz(out, -math.log(math.max(math.random(0, 1), 1e-256)) * (shape * scale)) //  fallback to exponential distro
+
+
+noise_gamma(float mu, float sigma) =>
+    k     = math.pow(mu / sigma, 2)
+    theta = math.pow(sigma, 2) / mu
+
+
+    k >= 1 ? gamma_mt(k, theta) : gamma_mt(k + 1, theta) * math.pow(math.random(0, 1), 1 / k)
+
+
+round_to_inf (float x, float tick) => //  round toward infinity
+    math.sign(x) * math.ceil(math.abs(x) / tick) * tick
+
+
+ceil(float x, float tick) => //  round up
+    math.ceil(x / tick) * tick
+//  dependencies........................................................................................................
+
+
+//  data interval logic.................................................................................................
+anchor  = input.string('Session', 'anchor',
+ ['1', '5', '24h', 'Session', 'Year', 'Cumulative', 'Moving window', 'Custom session'], group = 'interval')
+
+length  = input        (64         , 'moving window length' , group = 'interval')
+session = input.session('0000-2345', 'custom session period', group = 'interval')
+hybrid  = input        (false      , 'hybrid window'        , group = 'interval')
+
+isNewPeriod = switch anchor
+    '1'       => timeframe.change('1'   )
+    '5'       => timeframe.change('5'   )
+    '24h'     => timeframe.change('1440')
+	'Session' => timeframe.change('D'   )
+	'Year'    => timeframe.change('12M' )
+
+if na(close[1])
+	isNewPeriod := true
+
+var barsInSession = 0
+barsInSession    := isNewPeriod ? 1 : 1 + barsInSession
+
+var barsInSessionCustom = 0
+barsInSessionCustom    := na(time('', session)) ? 1 : 1 + barsInSessionCustom
+
+len = if anchor == 'Cumulative'
+    bar_index + 1
+else  if anchor == 'Moving window'
+    length
+else  if anchor == 'Custom session'
+    barsInSessionCustom
+else
+    barsInSession + (hybrid ? length : 0)
+//  data interval logic.................................................................................................
+
+
+//  main................................................................................................................
+step_space = input(1    , 'native tick size multiplier' , group = 'data'      ) * syminfo.mintick  //  space has to be ceiled
+round      = input(false, 'round levels to closest tick', group = 'parameters')
+
+
+bar_close = round_to_inf(close, step_space) //  close
+
+[forecast, innovation, emp_neg_mean, emp_neg_stdev, emp_pos_mean, emp_pos_stdev] = mfpm(bar_close, len, step_space)
+
+//  Welford, it's fast and one pass
+sim_neg_mean_w = 0.
+sim_neg_m2     = 0.
+sim_neg_cnt    = 0
+
+sim_pos_mean_w = 0.
+sim_pos_m2     = 0.
+sim_pos_cnt    = 0
+
+for i = 0 to len - 1
+    n_val = noise_gamma(emp_neg_mean, emp_neg_stdev)
+    p_val = noise_gamma(emp_pos_mean, emp_pos_stdev)
+
+    sim_neg_cnt    += 1
+    sim_neg_delta   = n_val - sim_neg_mean_w
+    sim_neg_mean_w += sim_neg_delta / sim_neg_cnt
+    sim_neg_m2     += sim_neg_delta * (n_val - sim_neg_mean_w)
+
+    sim_pos_cnt    += 1
+    sim_pos_delta   = p_val - sim_pos_mean_w
+    sim_pos_mean_w += sim_pos_delta / sim_pos_cnt
+    sim_pos_m2     += sim_pos_delta * (p_val - sim_pos_mean_w)
+
+sim_pos_mean  = lehmer_mean_online(                     sim_pos_mean_w, len, 2)
+sim_pos_stdev = lehmer_mean_online(math.sqrt(sim_pos_m2 / sim_pos_cnt), len, 2)
+sim_neg_mean  = lehmer_mean_online(                     sim_neg_mean_w, len, 2)
+sim_neg_stdev = lehmer_mean_online(math.sqrt(sim_neg_m2 / sim_neg_cnt), len, 2)
+
+
+gamma_scaler(mean, stdev, len) => //  can be further made tiny more precise, but not pine, and the effort is huge
+    k    = math.pow(mean / stdev, 2)
+    ln_n = math.log(len)
+
+    math.max((ln_n + (k - 1) * math.log(ln_n) - ln_gamma(k) + 0.5772156649015327) / k, 1)  //  regularization to ensure that estimated max can't be lower than mean, necessary for short initial windows
+
+
+emp_neg_scaler = gamma_scaler(emp_neg_mean, emp_neg_stdev, len)
+emp_pos_scaler = gamma_scaler(emp_pos_mean, emp_pos_stdev, len)
+sim_neg_scaler = gamma_scaler(sim_neg_mean, sim_neg_stdev, len)
+sim_pos_scaler = gamma_scaler(sim_pos_mean, sim_pos_stdev, len)
+
+
+adj = step_space + (step_space + math.pow(step_space, 2) / 12)  //  upp_basis + upp_dev, this part if Not lattice correction
+
+emp_neg_vola_soft = emp_neg_scaler * (emp_neg_mean                ) + adj
+emp_neg_vola_hard = emp_neg_scaler * (emp_neg_mean + emp_neg_stdev) + adj
+emp_pos_vola_soft = emp_pos_scaler * (emp_pos_mean                ) + adj
+emp_pos_vola_hard = emp_pos_scaler * (emp_pos_mean + emp_pos_stdev) + adj
+
+sim_neg_vola_soft = sim_neg_scaler * (sim_neg_mean                ) + adj
+sim_neg_vola_hard = sim_neg_scaler * (sim_neg_mean + sim_neg_stdev) + adj
+sim_pos_vola_soft = sim_pos_scaler * (sim_pos_mean                ) + adj
+sim_pos_vola_hard = sim_pos_scaler * (sim_pos_mean + sim_pos_stdev) + adj
+
+if round
+    emp_neg_vola_soft := ceil(emp_neg_vola_soft, step_space) 
+    emp_neg_vola_hard := ceil(emp_neg_vola_hard, step_space) 
+    emp_pos_vola_soft := ceil(emp_pos_vola_soft, step_space) 
+    emp_pos_vola_hard := ceil(emp_pos_vola_hard, step_space) 
+
+    sim_neg_vola_soft := ceil(sim_neg_vola_soft, step_space) 
+    sim_neg_vola_hard := ceil(sim_neg_vola_hard, step_space) 
+    sim_pos_vola_soft := ceil(sim_pos_vola_soft, step_space) 
+    sim_pos_vola_hard := ceil(sim_pos_vola_hard, step_space) 
+//  main................................................................................................................
+
+
+//  visuals.............................................................................................................
+viz_off = input(0, 'plotting offset', group = 'style') 
+
+
+plot(innovation, 'innovation', color.gray, 1, plot.style_columns)
+
+plot(forecast, 'forecast', color.purple, 1, plot.style_stepline, display = display.none, force_overlay = true)
+
+plot(-sim_neg_vola_soft, "MC negative volatility soft", color.red , 1, plot.style_linebr, offset = viz_off)
+plot(-sim_neg_vola_hard, "MC negative volatility hard", color.red , 1, plot.style_linebr, offset = viz_off)
+plot( sim_pos_vola_soft, "MC positive volatility soft", color.blue, 1, plot.style_linebr, offset = viz_off)
+plot( sim_pos_vola_hard, "MC positive volatility hard", color.blue, 1, plot.style_linebr, offset = viz_off)
+
+plot(-emp_neg_vola_soft, "EMP negative volatility soft", color.red , 1, plot.style_linebr, offset = viz_off, linestyle = plot.linestyle_dashed)
+plot(-emp_neg_vola_hard, "EMP negative volatility hard", color.red , 1, plot.style_linebr, offset = viz_off, linestyle = plot.linestyle_dashed)
+plot( emp_pos_vola_soft, "EMP positive volatility soft", color.blue, 1, plot.style_linebr, offset = viz_off, linestyle = plot.linestyle_dashed)
+plot( emp_pos_vola_hard, "EMP positive volatility hard", color.blue, 1, plot.style_linebr, offset = viz_off, linestyle = plot.linestyle_dashed)
+
+
+hline(0)
+//  visuals.............................................................................................................
+
+
+// ∞
