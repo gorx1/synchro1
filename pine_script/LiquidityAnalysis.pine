@@ -1,0 +1,250 @@
+//@version=6
+indicator('Liquidity Analysis', 'LA', true, max_lines_count = 500, max_boxes_count = 500)
+// by gorx1
+
+
+//  dependencies........................................................................................................
+type distro
+    float low_lim
+    float low_ext
+    float low_dev
+    float basis
+    float upp_dev
+    float upp_ext
+    float upp_lim
+    float dev
+    float asym
+
+
+mean(array<float> data, array<float> weights, len) =>
+    sum = 0.
+
+    for i = 0 to len - 1
+        sum += data.get(i) * weights.get(i)
+
+    array.new<float>(len, sum / weights.sum())
+
+
+std_moments(array<float> data, array<float> weights, array<float> fit, len) =>
+    sum_w = weights.sum()
+    
+    sum_m0 = 0.
+    sum_m1 = 0.
+    sum_m2 = 0.
+    sum_m3 = 0.
+    sum_m4 = 0.
+    sum_m5 = 0.
+    sum_m6 = 0.
+
+    for i = 0 to len - 1
+        weight = weights.get(i)
+        diff   = data   .get(i) - fit.get(i)
+
+        sum_m0 += math.pow(diff, 0) * weight
+        sum_m1 += math.pow(diff, 1) * weight
+        sum_m2 += math.pow(diff, 2) * weight
+        sum_m3 += math.pow(diff, 3) * weight
+        sum_m4 += math.pow(diff, 4) * weight
+        sum_m5 += math.pow(diff, 5) * weight
+        sum_m6 += math.pow(diff, 6) * weight
+
+
+    init = math.pow(sum_m0 / sum_w, 0)
+
+    bias = math.pow(sum_m1 / sum_w, 1 / 1)
+    dev  = math.pow(sum_m2 / sum_w, 1 / 2)
+
+    skew  = (sum_m3 / sum_w) / math.pow(dev, 3)
+    kurt  = (sum_m4 / sum_w) / math.pow(dev, 4)
+    hskew = (sum_m5 / sum_w) / math.pow(dev, 5)
+    hkurt = (sum_m6 / sum_w) / math.pow(dev, 6)
+
+
+    [bias, dev, skew, kurt, hskew, hkurt]
+
+
+mbad(data_y, weights, len) =>
+    fit                                   = mean       (data_y, weights,      len)
+    [bias, dev, skew, kurt, hskew, hkurt] = std_moments(data_y, weights, fit, len)
+    center                                = fit.get(0)
+
+
+    out = distro.new()
+
+    out.low_lim := center - (dev - bias) * (hkurt - hskew)
+    out.low_ext := center - (dev - bias) * ( kurt -  skew)
+    out.low_dev := center - (dev - bias)                  
+    out.basis   := center                                  
+    out.upp_dev := center + (dev + bias)                  
+    out.upp_ext := center + (dev + bias) * ( kurt +  skew)
+    out.upp_lim := center + (dev + bias) * (hkurt + hskew)
+
+    out.dev := dev    
+
+    out.asym := ((skew / kurt) - (hskew / hkurt)) * dev * 2
+
+
+    out
+
+
+round_to(x, tick) => math.round(x / tick) * tick
+ceil_to (x, tick) => math.ceil (x / tick) * tick
+
+
+type profile
+    array<float>  prices
+    array<int>   volumes
+    int             rows
+    int            total
+
+
+market_profile(lo, hi, scaler_space, scaler_force, len) => //  this algo with prefix sum works only for 'market' profile
+    mp_hi = ceil_to(ta.highest(hi, len), scaler_space)
+    mp_lo = ceil_to(ta.lowest (lo, len), scaler_space)
+
+    rows    = int((mp_hi - mp_lo) / scaler_space + 1)
+    prices  = array.new_float(rows, 0.0)
+    volumes = array.new_int  (rows, 0  )
+    total   = 0
+
+    for i = 0 to rows - 1
+        prices.set(i, mp_lo + scaler_space * i)
+
+    for i = 0 to len - 1
+        bar_lo = ceil_to(lo[i], scaler_space)
+        bar_hi = ceil_to(hi[i], scaler_space)
+
+        start_i = int((bar_lo - mp_lo) / scaler_space)
+        end_i   = int((bar_hi - mp_lo) / scaler_space)
+        //  boundary safeties
+        if start_i >= 0 and start_i < rows
+            volumes.set(start_i, volumes.get(start_i) + 1)
+        if end_i + 1 >= 0 and end_i + 1 < rows
+            volumes.set(end_i + 1, volumes.get(end_i + 1) - 1)
+
+    if rows > 1 //  final pass: prefix sum
+        for i = 0 to rows - 2 
+            volumes.set(i + 1, volumes.get(i) + volumes.get(i + 1))
+
+    for [i, v] in volumes
+        volume_ = int(round_to(v, scaler_force))
+        volumes.set(i, volume_)
+        total += volume_
+
+    out = profile.new(prices, volumes, rows, total)
+
+
+    out
+//  dependencies........................................................................................................
+
+
+//  data interval logic.................................................................................................
+len = input(64, 'moving window length', 'make it 0 to calculate over all available data')
+
+len := len < 1 ? bar_index + 1 : len > bar_index + 1 ? bar_index + 1 : len
+//  data interval logic.................................................................................................
+
+
+//  main................................................................................................................
+TOOLTIP_SCALER_SPACE = "make it 0 to automatically pick such an integer multiplier
+ so number of profile rows won't exceed length input"
+
+scaler_space = input(0 , 'native tick size multiplier', TOOLTIP_SCALER_SPACE, group = 'parameters') //  space has to be ceiled
+scaler_force = input(1 , 'native lot size multiplier' ,                       group = 'parameters') //  force has to be rounded
+
+
+range_in_ticks    = (ta.highest(high, len) - ta.lowest(low, len)) / syminfo.mintick 
+scaler_space_auto = math.max(math.floor(range_in_ticks / len), 1)
+step_space        = scaler_space < 1 ? scaler_space_auto * syminfo.mintick : scaler_space * syminfo.mintick
+step_force        = scaler_force * syminfo.mincontract
+
+
+market_profile = market_profile(low, high, step_space, step_force, len)
+
+
+prices  = market_profile.prices
+volumes = market_profile.volumes 
+rows    = market_profile.rows
+
+weights_unit = array.new_float(rows, 1)
+
+distro distro_ref_prices = mbad(prices , weights_unit, rows)
+distro distro_prices     = mbad(prices , volumes     , rows)
+distro distro_volumes    = mbad(volumes, prices      , rows)
+
+
+ref_prices_low_dev = distro_ref_prices.low_dev
+ref_prices_basis   = distro_ref_prices.basis
+ref_prices_upp_dev = distro_ref_prices.upp_dev
+
+prices_low_dev = distro_prices.low_dev
+prices_basis   = distro_prices.basis
+prices_upp_dev = distro_prices.upp_dev
+
+volumes_basis   = distro_volumes.basis
+volumes_upp_dev = distro_volumes.upp_dev
+
+
+diff_low_dev = prices_low_dev - ref_prices_low_dev
+diff_basis   = prices_basis   - ref_prices_basis
+diff_upp_dev = prices_upp_dev - ref_prices_upp_dev
+
+liquidity_imbalance = (diff_low_dev < 0 and diff_basis < 0 and diff_upp_dev < 0) ?  1 :
+                      (diff_low_dev > 0 and diff_basis > 0 and diff_upp_dev > 0) ? -1 : 0
+//  main................................................................................................................
+
+
+//  visuals.............................................................................................................
+left      = input(false, 'Left / right'     , inline='3', group = 'style')
+offset    = input(64   ,                      inline='3', group = 'style')
+analytics = input(true , 'display analytics'            , group = 'style')
+width     = input(2                                     , group = 'style')
+
+
+color_profile = liquidity_imbalance > 0 ? color.blue : liquidity_imbalance < 0 ? color.red : color.purple
+
+//  plotting profile
+lines   = line.all
+boxes   =  box.all
+lines_n = lines.size()
+boxes_n = boxes.size()
+loc     = left ? (bar_index - len + 1) : bar_index + offset
+
+if lines_n > 0                    // Deleting all the previous lines & boxes before
+    for i = 0 to lines_n - 1      // each tick. Necessary since we may have 
+        line.delete(lines.get(i)) // different number of rows on each bar / script tick. 
+
+if boxes_n > 0                              
+    for i = 0 to boxes_n - 1            
+        box.delete (boxes.get(i))
+
+for i = 0 to rows - 1
+    volume_ = volumes.get(i)
+    price   = prices .get(i)
+    
+    x1 = left ? loc           : loc - volume_
+    x2 = left ? loc + volume_ : loc
+
+    if i % 2 == 0
+        line.new(x1, price, x2, price,        color = analytics ? color_profile : color.gray,        width = width)
+    else
+        box.new (x1, price, x2, price, border_color = analytics ? color_profile : color.gray, border_width = width)
+
+//  plotting math
+if analytics
+    mp_lo = prices.min()
+    mp_hi = prices.max()
+    line.new(bar_index - len, mp_lo, bar_index - len, mp_hi, color = color.gray, width = 1, style = line.style_dashed)
+
+    x_basis   = int(left ? loc + volumes_basis   : loc - volumes_basis  )
+    x_upp_dev = int(left ? loc + volumes_upp_dev : loc - volumes_upp_dev)
+
+    line.new(x_basis  , mp_lo, x_basis  , mp_hi, color = color.purple, width = 2)
+    line.new(x_upp_dev, mp_lo, x_upp_dev, mp_hi, color = color.purple, width = 2)
+
+
+barcolor(color_profile, display = display.none)
+//  visuals.............................................................................................................
+
+
+//  ∞
